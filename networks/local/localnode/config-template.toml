@@ -1,2 +1,5 @@
+# Output level for logging, including package level options
+log_level = "debug"
+
 [rpc]
 laddr = "tcp://0.0.0.0:26657"

@@ -18,6 +18,7 @@ import (
 
 const (
 	ValidatorSetChangePrefix string = "val:"
+	RetainPrefix             string = "retain:"
 )
 
 //-----------------------------------------
@@ -33,6 +34,9 @@ type PersistentKVStoreApplication struct {
 	valAddrToPubKeyMap map[string]pc.PublicKey
 
 	logger log.Logger
+
+	start     int64
+	retainReq int64
 }
 
 func NewPersistentKVStoreApplication(dbDir string) *PersistentKVStoreApplication {
@@ -43,6 +47,7 @@ func NewPersistentKVStoreApplication(dbDir string) *PersistentKVStoreApplication
 	}
 
 	state := loadState(db)
+	height := state.Height
 
 	return &PersistentKVStoreApplication{
 		app: &Application{
@@ -51,6 +56,8 @@ func NewPersistentKVStoreApplication(dbDir string) *PersistentKVStoreApplication
 		},
 		valAddrToPubKeyMap: make(map[string]pc.PublicKey),
 		logger:             log.NewNopLogger(),
+		start:              height,
+		retainReq:          -1,
 	}
 }
 
@@ -83,6 +90,10 @@ func (app *PersistentKVStoreApplication) DeliverTx(req types.RequestDeliverTx) t
 		return app.execPrepareTx(req.Tx)
 	}
 
+	if isRetainTx(req.Tx) {
+		return app.execRetainTx(req.Tx)
+	}
+
 	// otherwise, update the key-value store
 	return app.app.DeliverTx(req)
 }
@@ -93,7 +104,14 @@ func (app *PersistentKVStoreApplication) CheckTx(req types.RequestCheckTx) types
 
 // Commit will panic if InitChain was not called
 func (app *PersistentKVStoreApplication) Commit() types.ResponseCommit {
-	return app.app.Commit()
+	resp := app.app.Commit()
+	if app.retainReq > 0 && app.retainReq >= app.start && app.retainReq <= app.app.state.Height {
+		app.logger.Info("Pruning", "RetainHeight", app.retainReq)
+		app.start = app.retainReq
+		resp.RetainHeight = app.retainReq
+		app.retainReq = -1
+	}
+	return resp
 }
 
 // When path=/val and data={validator address}, returns the validator update (types.ValidatorUpdate) varint encoded.
@@ -235,6 +253,10 @@ func isValidatorTx(tx []byte) bool {
 	return strings.HasPrefix(string(tx), ValidatorSetChangePrefix)
 }
 
+func isRetainTx(tx []byte) bool {
+	return strings.HasPrefix(string(tx), RetainPrefix)
+}
+
 // format is "val:pubkey!power"
 // pubkey is a base64-encoded 32-byte ed25519 key
 func (app *PersistentKVStoreApplication) execValidatorTx(tx []byte) types.ResponseDeliverTx {
@@ -315,6 +337,31 @@ func (app *PersistentKVStoreApplication) updateValidator(v types.ValidatorUpdate
 	// we only update the changes array if we successfully updated the tree
 	app.ValUpdates = append(app.ValUpdates, v)
 
+	return types.ResponseDeliverTx{Code: code.CodeTypeOK}
+}
+
+// format is "retain:retainHeight"
+// retain is an int64 containing the blocks to retain
+func (app *PersistentKVStoreApplication) execRetainTx(tx []byte) types.ResponseDeliverTx {
+	app.logger.Info("Executing a retain tx", "tx", string(tx))
+	tx = tx[len(RetainPrefix):]
+
+	// decode the power
+	retainS := string(tx)
+	retain, err := strconv.ParseInt(retainS, 10, 64)
+	if err != nil {
+		return types.ResponseDeliverTx{
+			Code: code.CodeTypeEncodingError,
+			Log:  fmt.Sprintf("Retain (%s) is not an int", retainS)}
+	}
+	if retain <= 0 || retain < app.start || retain > app.app.state.Height {
+		return types.ResponseDeliverTx{
+			Code: code.CodeTypeUnknownError,
+			Log:  fmt.Sprintf("Retain (%d) is not valid. Valid: %d < retain < %d", retain, app.start, app.app.state.Height)}
+	}
+
+	app.logger.Info("Setting retainReq", "retainReq", fmt.Sprint(retain))
+	app.retainReq = retain
 	return types.ResponseDeliverTx{Code: code.CodeTypeOK}
 }
 

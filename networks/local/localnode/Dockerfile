@@ -8,7 +8,7 @@ VOLUME /cometbft
 WORKDIR /cometbft
 EXPOSE 26656 26657
 ENTRYPOINT ["/usr/bin/wrapper.sh"]
-CMD ["node", "--proxy_app", "kvstore"]
+CMD ["node", "--proxy_app", "persistent_kvstore"]
 STOPSIGNAL SIGTERM
 
 COPY wrapper.sh /usr/bin/wrapper.sh
